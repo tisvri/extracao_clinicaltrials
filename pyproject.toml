@@ -1,0 +1,22 @@
+[project]
+name = "extracao-clinicaltrials"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Eduardo Augusto Rabelo Socca", email = "eduardo_socca@yahoo.com.br" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.5",
+    "requests>=2.34.2",
+    "streamlit>=1.38.0",
+]
+
+[project.scripts]
+extracao-clinicaltrials = "extracao_clinicaltrials:main"
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"
