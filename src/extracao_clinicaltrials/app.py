@@ -15,15 +15,6 @@ from client import (
     run_etl,
 )
 
-"""
-app.py — Interface Streamlit para busca no ClinicalTrials.gov
-================================================================
-Equivalente ao main.py (CLI/interativo), porém com uma interface web.
-
-Uso:
-    streamlit run src/extracao_clinicaltrials/app.py
-"""
-
 st.set_page_config(page_title="ClinicalTrials.gov — Extrator", page_icon="🧪", layout="wide")
 
 st.title("🧪 ClinicalTrials.gov — Extrator de Dados (API v2)")
@@ -38,9 +29,17 @@ def _get_api_version() -> dict[str, str]:
     return client.get_version()
 
 
+# try:
+#     version = _get_api_version()
+#     st.success(f"API v{version.get('apiVersion')}  |  Dados atualizados em: {version.get('dataTimestamp')}")
+# except Exception as e:
+#     st.warning(f"Não foi possível verificar a versão da API: {e}")
+
 try:
     version = _get_api_version()
-    st.success(f"API v{version.get('apiVersion')}  |  Dados atualizados em: {version.get('dataTimestamp')}")
+    raw_ts = version.get('dataTimestamp', '')
+    timestamp = raw_ts.replace('T', ' ')
+    st.success(f"API v{version.get('apiVersion')} | Dados atualizados em: {timestamp}")
 except Exception as e:
     st.warning(f"Não foi possível verificar a versão da API: {e}")
 
@@ -61,23 +60,23 @@ with st.form("search_form"):
     st.subheader("1. Parâmetros de busca")
     col1, col2 = st.columns(2)
     with col1:
-        query_cond = st.text_input("Condição / doença (query.cond)", placeholder="ex: lung cancer")
-        query_intr = st.text_input("Intervenção / tratamento (query.intr)")
-        query_spons = st.text_input("Patrocinador (query.spons)")
-        query_lead = st.text_input("Lead sponsor name (query.lead)")
+        query_cond = st.text_input("Condição / doença", placeholder="ex: lung cancer")
+        query_intr = st.text_input("Intervenção / tratamento")
+        query_spons = st.text_input("Patrocinador")
+        query_lead = st.text_input("Lead sponsor name")
     with col2:
-        query_titles = st.text_input("Título / acrônimo (query.titles)")
+        query_titles = st.text_input("Título / acrônimo")
         query_term = st.text_input(
-            "Termos gerais (query.term)",
+            "Termos gerais",
             placeholder="ex: AREA[LastUpdatePostDate]RANGE[2023-01-01,MAX]",
         )
-        query_id = st.text_input("IDs de estudo (query.id)", placeholder="ex: NCT04852770")
+        query_id = st.text_input("IDs de estudo", placeholder="ex: NCT04852770")
 
     st.subheader("2. Filtros")
     col3, col4 = st.columns(2)
     with col3:
         filter_status = st.multiselect(
-            "Status (filter.overallStatus)",
+            "Status",
             options=[
                 "RECRUITING", "COMPLETED", "NOT_YET_RECRUITING",
                 "ACTIVE_NOT_RECRUITING", "TERMINATED", "SUSPENDED", "WITHDRAWN",
@@ -85,11 +84,11 @@ with st.form("search_form"):
             help="Ex: selecione RECRUITING e NOT_YET_RECRUITING para estudos que já recrutam ou irão recrutar.",
         )
         filter_sponsor_type = st.multiselect(
-            "Tipo de patrocinador (LeadSponsorClass)",
+            "Tipo de patrocinador",
             options=["INDUSTRY", "NIH", "FED", "OTHER_GOV", "INDIV", "NETWORK", "AMBIG", "OTHER", "UNKNOWN"],
         )
         filter_intervention_type = st.multiselect(
-            "Tipo de intervenção (InterventionType)",
+            "Tipo de intervenção",
             options=[
                 "BEHAVIORAL", "BIOLOGICAL", "COMBINATION_PRODUCT", "DEVICE",
                 "DIAGNOSTIC_TEST", "DIETARY_SUPPLEMENT", "DRUG", "GENETIC",
@@ -98,13 +97,13 @@ with st.form("search_form"):
             help="Ex: selecione DRUG para buscar estudos com intervenções classificadas como medicamentos.",
         )
         filter_study_type = st.multiselect(
-            "Tipo de estudo (StudyType)",
+            "Tipo de estudo",
             options=["INTERVENTIONAL", "OBSERVATIONAL", "EXPANDED_ACCESS"],
         )
-        filter_ids_raw = st.text_input("NCT IDs específicos (filter.ids)", placeholder="vírgula p/ múltiplos")
+        filter_ids_raw = st.text_input("NCT IDs específicos", placeholder="vírgula p/ múltiplos")
     with col4:
         filter_phase = st.multiselect(
-            "Fase (Phase)",
+            "Fase",
             options=["NA", "EARLY_PHASE1", "PHASE1", "PHASE2", "PHASE3", "PHASE4"],
         )
         location_country_operator = st.selectbox(
@@ -113,15 +112,15 @@ with st.form("search_form"):
             help="Ex: selecione 'Não contém' e informe Brasil para excluir estudos com locais no Brasil.",
         )
         location_country = st.text_input(
-            "País da localidade (LocationCountry)",
+            "País da localidade",
             placeholder="ex: Brazil",
         )
         filter_sex = st.multiselect(
             "Sexo elegível (Sex)",
             options=["ALL", "FEMALE", "MALE"],
         )
-        filter_advanced = st.text_input("Filtro avançado Essie adicional (filter.advanced)", placeholder="ex: AREA[StartDate]2022")
-        filter_geo = st.text_input("Filtro geográfico (filter.geo)", placeholder="ex: distance(-23.55,-46.63,50km)")
+        filter_advanced = st.text_input("Filtro avançado Essie adicional", placeholder="ex: AREA[StartDate]2022")
+        filter_geo = st.text_input("Filtro geográfico", placeholder="ex: distance(-23.55,-46.63,50km)")
 
 
     st.subheader("3. Campos e ordenação")
