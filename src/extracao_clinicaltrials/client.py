@@ -98,6 +98,7 @@ DEFAULT_FIELDS = [
     "EnrollmentCount",
     "StudyType",
     "HasResults",
+    "LocationCountry",
 ]
 
 logger = logging.getLogger(__name__)
@@ -269,6 +270,13 @@ def flatten_study(study: dict[str, Any]) -> dict[str, Any]:
 
     conditions = ";".join(cond_mod.get("conditions", []))
 
+    locations = contacts.get("locations", [])
+    countries = list(dict.fromkeys(
+        location.get("country", "").strip()
+        for location in locations
+        if location.get("country", "").strip()
+    ))
+
     # fases
     phases = ";".join(design_mod.get("phases", []))
 
@@ -286,6 +294,7 @@ def flatten_study(study: dict[str, Any]) -> dict[str, Any]:
         "enrollment_count":         enroll_mod.get("count", ""),
         "enrollment_type":          enroll_mod.get("type", ""),
         "conditions":               conditions,
+        "countries":                "; ".join(countries),
         "intervention_names":       intervention_names,
         "intervention_types":       intervention_types,
         "intervention_descriptions": intervention_descriptions,

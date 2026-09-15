@@ -225,6 +225,7 @@ if submitted:
         "InterventionName",
         "InterventionType",
         "InterventionDescription",
+        "LocationCountry",
     ]))
     sort = [v.strip() for v in sort_raw.split(",") if v.strip()] or None
     max_studies = int(max_studies_raw) if max_studies_raw.strip().isdigit() else None
@@ -282,6 +283,15 @@ if df is not None:
     st.subheader("5. Resultado")
     st.write(f"**{len(df)}** estudos encontrados.")
     display_df = df.copy()
+    if "countries" in display_df.columns:
+        priority_columns = [
+            column for column in ("nct_id", "countries")
+            if column in display_df.columns
+        ]
+        ordered_columns = priority_columns + [
+            column for column in display_df.columns if column not in priority_columns
+        ]
+        display_df = display_df[ordered_columns]
     if "nct_id" in display_df.columns:
         display_df["nct_id"] = display_df["nct_id"].map(
             lambda nct_id: f"https://clinicaltrials.gov/study/{nct_id}"
@@ -295,6 +305,7 @@ if df is not None:
                     "NCT ID",
                     display_text=r"https://clinicaltrials.gov/study/(.*)",
                 ),
+                "countries": st.column_config.TextColumn("Países"),
             },
             width="stretch",
         )
@@ -332,107 +343,161 @@ if df is not None:
     st.divider()
     st.subheader("6. Analytics")
 
-    with st.container(horizontal=True):
-        st.metric("Total de estudos", f"{len(df)}", border=True)
-        if "has_results" in df.columns and len(df):
-            pct_results = df["has_results"].astype(bool).sum() / len(df) * 100
-            st.metric("Com resultados", f"{pct_results:.1f}%", border=True)
-        if "enrollment_count" in df.columns:
-            enrollment = pd.to_numeric(df["enrollment_count"], errors="coerce")
-            avg_enrollment = f"{enrollment.mean():.0f}" if enrollment.notna().any() else "—"
-            st.metric("Inscrição média", avg_enrollment, border=True)
-        if "lead_sponsor_name" in df.columns:
-            st.metric("Patrocinadores únicos", f"{df['lead_sponsor_name'].nunique()}", border=True)
+    def _split_column(column: str) -> pd.DataFrame:
+        """Transforma valores separados por ponto e vírgula em linhas contáveis."""
+        if column not in df.columns:
+            return pd.DataFrame(columns=[column])
+        values = df[column].fillna("").astype(str).str.split(";").explode().str.strip()
+        return values[values.ne("")].to_frame(name=column)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        with st.container(border=True):
-            st.markdown("**Distribuição por status**")
-            if "overall_status" in df.columns and len(df):
-                status_counts = df["overall_status"].value_counts().reset_index()
-                status_counts.columns = ["status", "contagem"]
-                st.bar_chart(status_counts, x="status", y="contagem", x_label="", y_label="", horizontal=True)
-            else:
-                st.info("Coluna 'overall_status' não disponível.")
+    def _show_unavailable(message: str) -> None:
+        st.info(message)
 
-    with col_b:
-        with st.container(border=True):
-            st.markdown("**Distribuição por tipo de estudo**")
-            if "study_type" in df.columns and len(df):
-                type_counts = df["study_type"].value_counts().reset_index()
-                type_counts.columns = ["study_type", "contagem"]
-                pie_chart = (
-                    alt.Chart(type_counts)
-                    .mark_arc(innerRadius=50)
-                    .encode(
-                        theta="contagem:Q",
-                        color="study_type:N",
-                        tooltip=["study_type", "contagem"],
-                    )
-                )
-                st.altair_chart(pie_chart)
-            else:
-                st.info("Coluna 'study_type' não disponível.")
-
-    col_c, col_d = st.columns(2)
-    with col_c:
-        with st.container(border=True):
-            st.markdown("**Distribuição por fase**")
-            if "phases" in df.columns and len(df):
-                phases_series = df["phases"].replace("", "Não informado").fillna("Não informado")
-                phase_counts = phases_series.value_counts().reset_index()
-                phase_counts.columns = ["fase", "contagem"]
-                st.bar_chart(phase_counts, x="fase", y="contagem", x_label="", y_label="")
-            else:
-                st.info("Coluna 'phases' não disponível.")
-
-    with col_d:
-        with st.container(border=True):
-            st.markdown("**Estudos com resultados publicados**")
-            if "has_results" in df.columns and len(df):
-                results_counts = df["has_results"].astype(bool).value_counts().rename({True: "Sim", False: "Não"}).reset_index()
-                results_counts.columns = ["tem_resultados", "contagem"]
-                results_chart = (
-                    alt.Chart(results_counts)
-                    .mark_arc(innerRadius=50)
-                    .encode(
-                        theta="contagem:Q",
-                        color="tem_resultados:N",
-                        tooltip=["tem_resultados", "contagem"],
-                    )
-                )
-                st.altair_chart(results_chart)
-            else:
-                st.info("Coluna 'has_results' não disponível.")
-
-    with st.container(border=True):
-        st.markdown("**Top 10 patrocinadores**")
-        if "lead_sponsor_name" in df.columns and len(df):
-            sponsor_counts = (
-                df["lead_sponsor_name"]
-                .replace("", "Não informado")
-                .fillna("Não informado")
-                .value_counts()
-                .head(10)
-                .reset_index()
+    # 1. Cronograma: volume por ano e duração esperada do estudo.
+    st.markdown("**1. Análises temporais e de cronograma**")
+    start_dates = pd.to_datetime(
+        df["start_date"] if "start_date" in df.columns else pd.Series(index=df.index),
+        errors="coerce",
+    )
+    completion_dates = pd.to_datetime(
+        df["primary_completion_date"]
+        if "primary_completion_date" in df.columns
+        else pd.Series(index=df.index),
+        errors="coerce",
+    )
+    duration_days = (completion_dates - start_dates).dt.days
+    duration = duration_days[duration_days.ge(0)]
+    temporal_col, duration_col = st.columns(2)
+    with temporal_col:
+        if start_dates.notna().any():
+            starts_by_year = (
+                start_dates.dropna().dt.year.value_counts().sort_index()
+                .rename_axis("ano").reset_index(name="estudos")
             )
-            sponsor_counts.columns = ["patrocinador", "contagem"]
-            sponsor_chart = (
-                alt.Chart(sponsor_counts)
-                .mark_bar()
-                .encode(
-                    x=alt.X("contagem:Q", title=None, axis=alt.Axis(grid=False)),
-                    y=alt.Y(
-                        "patrocinador:N",
-                        sort="-x",
-                        title=None,
-                        axis=alt.Axis(grid=False, labelLimit=320, labelPadding=8),
-                    ),
-                    tooltip=["patrocinador", "contagem"],
-                )
-                .properties(height=320)
-            )
-            st.altair_chart(sponsor_chart)
+            st.markdown("**Volume de início por ano**")
+            st.line_chart(starts_by_year, x="ano", y="estudos", x_label="Ano", y_label="Estudos")
         else:
-            st.info("Coluna 'lead_sponsor_name' não disponível.")
+            _show_unavailable("Não há datas de início válidas para esta análise.")
+    with duration_col:
+        if duration.size:
+            st.metric("Duração média esperada", f"{duration.mean() / 30.44:.1f} meses", border=True)
+            st.metric("Estudos com datas comparáveis", f"{duration.size}", border=True)
+            duration_df = pd.DataFrame({"duração (meses)": duration / 30.44})
+            st.bar_chart(duration_df, x=None, y="duração (meses)", x_label="Estudo", y_label="Meses")
+        else:
+            _show_unavailable("Não há pares válidos de início e conclusão primária.")
+
+    # 2. Enrollment: escala geral e relação com fase clínica.
+    st.markdown("**2. Análises de volumetria e escopo**")
+    enrollment = pd.to_numeric(
+        df["enrollment_count"]
+        if "enrollment_count" in df.columns
+        else pd.Series(index=df.index),
+        errors="coerce",
+    ).dropna()
+    enrollment_col, phase_enrollment_col = st.columns(2)
+    with enrollment_col:
+        if enrollment.size:
+            metrics = st.container(horizontal=True)
+            with metrics:
+                st.metric("Média", f"{enrollment.mean():,.0f}", border=True)
+                st.metric("Mediana", f"{enrollment.median():,.0f}", border=True)
+                st.metric("Máximo", f"{enrollment.max():,.0f}", border=True)
+            st.caption(f"Base válida: {enrollment.size} de {len(df)} estudos.")
+        else:
+            _show_unavailable("Não há valores numéricos de enrollment.")
+    with phase_enrollment_col:
+        if "phases" in df.columns and enrollment.size:
+            phase_data = df[["phases", "enrollment_count"]].copy()
+            phase_data["enrollment_count"] = pd.to_numeric(phase_data["enrollment_count"], errors="coerce")
+            phase_data["phases"] = phase_data["phases"].fillna("").astype(str).str.split(";")
+            phase_data = phase_data.explode("phases")
+            phase_data["phases"] = phase_data["phases"].str.strip()
+            phase_data = phase_data[phase_data["phases"].ne("")]
+            phase_data["enrollment_count"] = pd.to_numeric(phase_data["enrollment_count"], errors="coerce")
+            phase_summary = (
+                phase_data.dropna(subset=["enrollment_count"])
+                .groupby("phases", as_index=False)["enrollment_count"].mean()
+                .rename(columns={"enrollment_count": "média de pacientes"})
+            )
+            st.markdown("**Enrollment médio por fase**")
+            st.bar_chart(phase_summary, x="phases", y="média de pacientes", x_label="Fase", y_label="Pacientes")
+        else:
+            _show_unavailable("Não há fases e enrollment válidos para cruzamento.")
+
+    # 3. Geografia: concentração e complexidade logística.
+    st.markdown("**3. Análises geográficas e logísticas**")
+    countries = _split_column("countries")
+    if "countries" in df.columns:
+        country_counts = countries["countries"].value_counts().head(15).rename_axis("país").reset_index(name="estudos")
+        country_col, complexity_col = st.columns(2)
+        with country_col:
+            st.markdown("**Polos de pesquisa: top 15 países**")
+            st.bar_chart(country_counts, x="país", y="estudos", x_label="País", y_label="Estudos", horizontal=True)
+        with complexity_col:
+            country_count_per_study = df["countries"].fillna("").astype(str).map(
+                lambda value: len({country.strip() for country in value.split(";") if country.strip()})
+            )
+            country_count_per_study = country_count_per_study[country_count_per_study.gt(0)]
+            if country_count_per_study.size:
+                st.metric("Média de países por estudo", f"{country_count_per_study.mean():.1f}", border=True)
+                st.metric("Máximo de países em um estudo", f"{country_count_per_study.max()}", border=True)
+                st.caption(f"Base válida: {country_count_per_study.size} estudos.")
+            else:
+                _show_unavailable("Não há países válidos para medir a complexidade logística.")
+    else:
+        _show_unavailable("A coluna countries não está disponível.")
+
+    # 4. Patrocinadores: participação e perfil operacional.
+    st.markdown("**4. Análises de mercado e patrocinadores**")
+    sponsor_columns = ["lead_sponsor_name"]
+    if "enrollment_count" in df.columns:
+        sponsor_columns.append("enrollment_count")
+    sponsor_data = df[sponsor_columns].copy() if "lead_sponsor_name" in df.columns else pd.DataFrame()
+    if not sponsor_data.empty:
+        sponsor_data["lead_sponsor_name"] = sponsor_data["lead_sponsor_name"].fillna("").astype(str).str.strip()
+        if "enrollment_count" in sponsor_data.columns:
+            sponsor_data["enrollment_count"] = pd.to_numeric(sponsor_data["enrollment_count"], errors="coerce")
+        else:
+            sponsor_data["enrollment_count"] = float("nan")
+        sponsor_data = sponsor_data[sponsor_data["lead_sponsor_name"].ne("")]
+        sponsor_summary = (
+            sponsor_data.groupby("lead_sponsor_name", as_index=False)
+            .agg(estudos=("lead_sponsor_name", "size"), enrollment_médio=("enrollment_count", "mean"))
+            .sort_values("estudos", ascending=False).head(15)
+        )
+        st.bar_chart(sponsor_summary, x="lead_sponsor_name", y="estudos", x_label="Patrocinador", y_label="Estudos", horizontal=True)
+        st.dataframe(sponsor_summary, hide_index=True, width="stretch")
+    else:
+        _show_unavailable("Não há patrocinadores válidos para esta análise.")
+
+    # 5. Perfil clínico e científico: condições e tipos de intervenção.
+    st.markdown("**5. Análises clínicas e científicas**")
+    condition_data = _split_column("conditions")
+    intervention_data = _split_column("intervention_types")
+    condition_col, intervention_col = st.columns(2)
+    with condition_col:
+        if not condition_data.empty:
+            condition_counts = condition_data["conditions"].value_counts().head(15).rename_axis("condição").reset_index(name="estudos")
+            st.markdown("**Condições mais frequentes**")
+            st.bar_chart(condition_counts, x="condição", y="estudos", x_label="Condição", y_label="Estudos", horizontal=True)
+        else:
+            _show_unavailable("Não há condições válidas para análise.")
+    with intervention_col:
+        if not intervention_data.empty:
+            intervention_counts = intervention_data["intervention_types"].value_counts().rename_axis("tipo").reset_index(name="ocorrências")
+            st.markdown("**Tipos de intervenção**")
+            st.bar_chart(intervention_counts, x="tipo", y="ocorrências", x_label="Tipo", y_label="Ocorrências")
+            intervention_profile = df["intervention_types"].fillna("").astype(str).map(
+                lambda value: [item.strip() for item in value.split(";") if item.strip()]
+            )
+            intervention_profile = intervention_profile[intervention_profile.map(bool)]
+            combined_share = intervention_profile.map(lambda items: len(set(items)) > 1).mean() * 100
+            drug_share = intervention_profile.map(lambda items: all(item == "DRUG" for item in items)).mean() * 100
+            metrics = st.container(horizontal=True)
+            with metrics:
+                st.metric("Estudos com intervenção combinada", f"{combined_share:.1f}%", border=True)
+                st.metric("Estudos somente com medicamentos", f"{drug_share:.1f}%", border=True)
+        else:
+            _show_unavailable("Não há tipos de intervenção válidos para análise.")
 
