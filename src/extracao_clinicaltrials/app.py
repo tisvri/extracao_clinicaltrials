@@ -51,6 +51,67 @@ def _essie_clause(field: str, values: list[str]) -> str | None:
     if len(values) == 1:
         return f"AREA[{field}]{values[0]}"
     return f"AREA[{field}]({' OR '.join(values)})"
+# ---------------------------------------------------------------------------
+# Variáveis
+# ---------------------------------------------------------------------------
+status_labels = {
+    "RECRUITING": "Recrutando",
+    "COMPLETED": "Concluído",
+    "NOT_YET_RECRUITING": "Ainda não recrutando",
+    "ACTIVE_NOT_RECRUITING": "Ativo (sem recrutamento)",
+    "TERMINATED": "Encerrado precocemente",
+    "SUSPENDED": "Suspenso",
+    "WITHDRAWN": "Retirado",
+}
+
+tipo_financiamento = {
+    "INDUSTRY": "Indústria",
+    "NIH": "U.S. National Institutes of Health",
+    "FED": "U.S. Federal Government",
+    "OTHER_GOV": "Other U.S. Federal agencies",
+    "INDIV": "Indivídual",
+    "NETWORK": "Rede",
+    "AMBIG": "Ambíguo",
+    "OTHER": "Outros",
+    "UNKNOWN": "Desconhecido"
+}
+
+intervention_type_labels = {
+    "BEHAVIORAL": "Comportamental",
+    "BIOLOGICAL": "Biológica",
+    "COMBINATION_PRODUCT": "Produto combinado",
+    "DEVICE": "Dispositivos",
+    "DIAGNOSTIC_TEST": "Teste diagnóstico",
+    "DIETARY_SUPPLEMENT": "Suplemento dietético",
+    "DRUG": "Medicamento",
+    "GENETIC": "Genética",
+    "PROCEDURE": "Procedimento",
+    "RADIATION": "Radiação",
+    "OTHER": "Outros",
+}
+
+study_type_labels = {
+    "INTERVENTIONAL": "Intervencional",
+    "OBSERVATIONAL": "Observacional",
+    "EXPANDED_ACCESS": "Acesso expandido",
+}
+
+phase_labels = {
+    "NA": "Não aplicável",
+    "EARLY_PHASE1": "Fase inicial 1",
+    "PHASE1": "Fase 1",
+    "PHASE2": "Fase 2",
+    "PHASE3": "Fase 3",
+    "PHASE4": "Fase 4",
+}
+
+gender_labels = {
+    "ALL": "Todos",
+    "MALE": "Masculino",
+    "FEMALE": "Feminino",
+}
+
+
 
 # ---------------------------------------------------------------------------
 # Formulário de busca
@@ -77,34 +138,45 @@ with st.form("search_form"):
     with col3:
         filter_status = st.multiselect(
             "Status",
-            options=[
-                "RECRUITING", "COMPLETED", "NOT_YET_RECRUITING",
-                "ACTIVE_NOT_RECRUITING", "TERMINATED", "SUSPENDED", "WITHDRAWN",
-            ],
+            options=list(status_labels.keys()),
+            format_func=lambda x: status_labels.get(x, x),
             help="Ex: selecione RECRUITING e NOT_YET_RECRUITING para estudos que já recrutam ou irão recrutar.",
         )
         filter_sponsor_type = st.multiselect(
             "Tipo de patrocinador",
-            options=["INDUSTRY", "NIH", "FED", "OTHER_GOV", "INDIV", "NETWORK", "AMBIG", "OTHER", "UNKNOWN"],
+            options=list(tipo_financiamento.keys()),
+            format_func=lambda x: tipo_financiamento.get(x, x),
         )
+        with st.expander("ℹ️ Legenda dos tipos de financiamento"):
+            st.markdown("""
+            | Código | Nome Oficial | Descrição |
+            | :--- | :--- | :--- |
+            | **INDUSTRY** | Industry | Indústria farmacêutica, biotec ou dispositivos |
+            | **NIH** | U.S. National Institutes of Health | Institutos Nacionais de Saúde dos EUA |
+            | **FED** | U.S. Federal Gov | Agências federais dos EUA (FDA, CDC, DoD) |
+            | **OTHER_GOV** | Other U.S. Federal agencies | Governos estaduais, locais ou estrangeiros |
+            | **INDIV** | Individual | Pessoa física / patrocinador independente |
+            | **NETWORK** | Network | Consórcios e redes colaborativas |
+            | **AMBIG** | Ambiguous | Classificação ambígua |
+            | **OTHER** | Other | Universidades, hospitais acadêmicos, ONGs |
+            | **UNKNOWN** | Unknown | Desconhecido ou não informado |
+            """)
         filter_intervention_type = st.multiselect(
             "Tipo de intervenção",
-            options=[
-                "BEHAVIORAL", "BIOLOGICAL", "COMBINATION_PRODUCT", "DEVICE",
-                "DIAGNOSTIC_TEST", "DIETARY_SUPPLEMENT", "DRUG", "GENETIC",
-                "PROCEDURE", "RADIATION", "OTHER",
-            ],
-            help="Ex: selecione DRUG para buscar estudos com intervenções classificadas como medicamentos.",
+            options=list(intervention_type_labels.keys()),
+            format_func=lambda x: intervention_type_labels.get(x, x),
         )
         filter_study_type = st.multiselect(
             "Tipo de estudo",
-            options=["INTERVENTIONAL", "OBSERVATIONAL", "EXPANDED_ACCESS"],
+            options=list(study_type_labels.keys()),
+            format_func=lambda x: study_type_labels.get(x, x),
         )
         filter_ids_raw = st.text_input("NCT IDs específicos", placeholder="vírgula p/ múltiplos")
     with col4:
         filter_phase = st.multiselect(
             "Fase",
-            options=["NA", "EARLY_PHASE1", "PHASE1", "PHASE2", "PHASE3", "PHASE4"],
+            options=list(phase_labels.keys()),
+            format_func=lambda x: phase_labels.get(x, x),
         )
         location_country_operator = st.selectbox(
             "País da localidade",
@@ -117,7 +189,8 @@ with st.form("search_form"):
         )
         filter_sex = st.multiselect(
             "Sexo elegível (Sex)",
-            options=["ALL", "FEMALE", "MALE"],
+            options=list(gender_labels.keys()),
+            format_func=lambda x: gender_labels.get(x, x),
         )
         filter_advanced = st.text_input("Filtro avançado Essie adicional", placeholder="ex: AREA[StartDate]2022")
         filter_geo = st.text_input("Filtro geográfico", placeholder="ex: distance(-23.55,-46.63,50km)")
