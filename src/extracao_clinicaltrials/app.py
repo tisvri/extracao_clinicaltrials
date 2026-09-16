@@ -226,6 +226,12 @@ if submitted:
         "InterventionType",
         "InterventionDescription",
         "LocationCountry",
+        "CentralContactName",
+        "CentralContactRole",
+        "CentralContactPhone",
+        "CentralContactEMail",
+        "CollaboratorName",
+        "LocationGeoPoint",
     ]))
     sort = [v.strip() for v in sort_raw.split(",") if v.strip()] or None
     max_studies = int(max_studies_raw) if max_studies_raw.strip().isdigit() else None
@@ -282,7 +288,7 @@ df = st.session_state.get("df")
 if df is not None:
     st.subheader("5. Resultado")
     st.write(f"**{len(df)}** estudos encontrados.")
-    display_df = df.copy()
+    display_df = df.drop(columns=["_site_locations"], errors="ignore").copy()
     if "countries" in display_df.columns:
         priority_columns = [
             column for column in ("nct_id", "countries")
@@ -306,6 +312,11 @@ if df is not None:
                     display_text=r"https://clinicaltrials.gov/study/(.*)",
                 ),
                 "countries": st.column_config.TextColumn("Países"),
+                "collaborator_names": st.column_config.TextColumn("Empresas colaboradoras"),
+                "central_contact_names": st.column_config.TextColumn("Contato central - nome"),
+                "central_contact_roles": st.column_config.TextColumn("Contato central - função"),
+                "central_contact_phones": st.column_config.TextColumn("Contato central - telefone"),
+                "central_contact_emails": st.column_config.TextColumn("Contato central - e-mail"),
             },
             width="stretch",
         )
@@ -313,19 +324,20 @@ if df is not None:
         st.dataframe(display_df, width="stretch")
 
     output_format = st.session_state.get("output_format", "csv")
+    export_df = df.drop(columns=["_site_locations"], errors="ignore")
     if output_format == "csv":
-        data = df.to_csv(index=False).encode("utf-8")
+        data = export_df.to_csv(index=False).encode("utf-8")
         mime = "text/csv"
         file_name = "results.csv"
     elif output_format == "json":
-        data = json.dumps(df.to_dict(orient="records"), ensure_ascii=False, indent=2).encode("utf-8")
+        data = json.dumps(export_df.to_dict(orient="records"), ensure_ascii=False, indent=2).encode("utf-8")
         mime = "application/json"
         file_name = "results.json"
     elif output_format == "xlsx":
         from io import BytesIO
 
         output = BytesIO()
-        df.to_excel(output, index=False, engine="openpyxl")
+        export_df.to_excel(output, index=False, engine="openpyxl")
         data = output.getvalue()
         mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         file_name = "results.xlsx"
@@ -352,6 +364,21 @@ if df is not None:
 
     def _show_unavailable(message: str) -> None:
         st.info(message)
+
+    def _site_location_frame() -> pd.DataFrame:
+        """Converte os locais geocodificados armazenados por estudo em pontos do mapa."""
+        if "_site_locations" not in df.columns:
+            return pd.DataFrame(columns=["latitude", "longitude"])
+
+        map_points = []
+        for nct_id, locations_json in df[["nct_id", "_site_locations"]].itertuples(index=False):
+            try:
+                locations = json.loads(locations_json or "[]")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            for location in locations:
+                map_points.append({"nct_id": nct_id, **location})
+        return pd.DataFrame(map_points)
 
     # 1. Cronograma: volume por ano e duração esperada do estudo.
     st.markdown("**1. Análises temporais e de cronograma**")
@@ -447,6 +474,14 @@ if df is not None:
                 _show_unavailable("Não há países válidos para medir a complexidade logística.")
     else:
         _show_unavailable("A coluna countries não está disponível.")
+
+    map_locations = _site_location_frame()
+    if not map_locations.empty:
+        st.markdown("**Mapa dos centros de pesquisa**")
+        st.caption(f"{len(map_locations)} centros com latitude e longitude disponíveis.")
+        st.map(map_locations, latitude="latitude", longitude="longitude", height=520)
+    else:
+        _show_unavailable("Não há coordenadas disponíveis para exibir os centros no mapa.")
 
     # 4. Patrocinadores: participação e perfil operacional.
     st.markdown("**4. Análises de mercado e patrocinadores**")

@@ -99,6 +99,12 @@ DEFAULT_FIELDS = [
     "StudyType",
     "HasResults",
     "LocationCountry",
+    "CentralContactName",
+    "CentralContactRole",
+    "CentralContactPhone",
+    "CentralContactEMail",
+    "CollaboratorName",
+    "LocationGeoPoint",
 ]
 
 logger = logging.getLogger(__name__)
@@ -255,6 +261,8 @@ def flatten_study(study: dict[str, Any]) -> dict[str, Any]:
     cond_mod  = proto.get("conditionsModule",      {})
     elig_mod  = proto.get("eligibilityModule",     {})
     contacts  = proto.get("contactsLocationsModule", {})
+    central_contacts = contacts.get("centralContacts", [])
+    collaborators = sponsor_mod.get("collaborators", [])
 
     # intervenções: pega o nome da primeira, ou todas separadas por ";"
     interventions = arms_mod.get("interventions", [])
@@ -276,6 +284,20 @@ def flatten_study(study: dict[str, Any]) -> dict[str, Any]:
         for location in locations
         if location.get("country", "").strip()
     ))
+    site_locations = [
+        {
+            "facility": location.get("facility", ""),
+            "city": location.get("city", ""),
+            "state": location.get("state", ""),
+            "country": location.get("country", ""),
+            "status": location.get("status", ""),
+            "latitude": location.get("geoPoint", {}).get("lat"),
+            "longitude": location.get("geoPoint", {}).get("lon"),
+        }
+        for location in locations
+        if location.get("geoPoint", {}).get("lat") is not None
+        and location.get("geoPoint", {}).get("lon") is not None
+    ]
 
     # fases
     phases = ";".join(design_mod.get("phases", []))
@@ -300,12 +322,30 @@ def flatten_study(study: dict[str, Any]) -> dict[str, Any]:
         "intervention_descriptions": intervention_descriptions,
         "lead_sponsor_name":        lead.get("name", ""),
         "lead_sponsor_class":       lead.get("class", ""),
+        "collaborator_names":       "; ".join(
+            collaborator.get("name", "")
+            for collaborator in collaborators
+            if collaborator.get("name")
+        ),
+        "central_contact_names":    "; ".join(
+            contact.get("name", "") for contact in central_contacts if contact.get("name")
+        ),
+        "central_contact_roles":    "; ".join(
+            contact.get("role", "") for contact in central_contacts if contact.get("role")
+        ),
+        "central_contact_phones":   "; ".join(
+            contact.get("phone", "") for contact in central_contacts if contact.get("phone")
+        ),
+        "central_contact_emails":   "; ".join(
+            contact.get("email", "") for contact in central_contacts if contact.get("email")
+        ),
         "minimum_age":              elig_mod.get("minimumAge", ""),
         "maximum_age":              elig_mod.get("maximumAge", ""),
         "sex":                      elig_mod.get("sex", ""),
         "healthy_volunteers":       elig_mod.get("healthyVolunteers", ""),
         "brief_summary":            desc_mod.get("briefSummary", ""),
         "has_results":              study.get("hasResults", False),
+        "_site_locations":          json.dumps(site_locations, ensure_ascii=False),
     }
     return flat
 
