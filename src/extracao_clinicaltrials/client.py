@@ -86,6 +86,7 @@ DEFAULT_PAGE_SIZE = 100          # máximo suportado pela API: 1 000
 DEFAULT_FIELDS = [
     "NCTId",
     "BriefTitle",
+    "Acronym",
     "OverallStatus",
     "Phase",
     "Condition",

@@ -289,15 +289,14 @@ if df is not None:
     st.subheader("5. Resultado")
     st.write(f"**{len(df)}** estudos encontrados.")
     display_df = df.drop(columns=["_site_locations"], errors="ignore").copy()
-    if "countries" in display_df.columns:
-        priority_columns = [
-            column for column in ("nct_id", "countries")
-            if column in display_df.columns
-        ]
-        ordered_columns = priority_columns + [
-            column for column in display_df.columns if column not in priority_columns
-        ]
-        display_df = display_df[ordered_columns]
+    priority_columns = [
+        column for column in ("nct_id", "brief_title", "acronym", "countries")
+        if column in display_df.columns
+    ]
+    ordered_columns = priority_columns + [
+        column for column in display_df.columns if column not in priority_columns
+    ]
+    display_df = display_df[ordered_columns]
     if "nct_id" in display_df.columns:
         display_df["nct_id"] = display_df["nct_id"].map(
             lambda nct_id: f"https://clinicaltrials.gov/study/{nct_id}"
@@ -311,6 +310,8 @@ if df is not None:
                     "NCT ID",
                     display_text=r"https://clinicaltrials.gov/study/(.*)",
                 ),
+                "brief_title": st.column_config.TextColumn("Título"),
+                "acronym": st.column_config.TextColumn("Acrônimo"),
                 "countries": st.column_config.TextColumn("Países"),
                 "collaborator_names": st.column_config.TextColumn("Empresas colaboradoras"),
                 "central_contact_names": st.column_config.TextColumn("Contato central - nome"),
@@ -325,6 +326,14 @@ if df is not None:
 
     output_format = st.session_state.get("output_format", "csv")
     export_df = df.drop(columns=["_site_locations"], errors="ignore")
+    export_priority_columns = [
+        column for column in ("nct_id", "brief_title", "acronym", "countries")
+        if column in export_df.columns
+    ]
+    export_df = export_df[
+        export_priority_columns
+        + [column for column in export_df.columns if column not in export_priority_columns]
+    ]
     if output_format == "csv":
         data = export_df.to_csv(index=False).encode("utf-8")
         mime = "text/csv"
