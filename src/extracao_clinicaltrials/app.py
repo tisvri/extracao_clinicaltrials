@@ -4,15 +4,25 @@ from __future__ import annotations
 import io
 import json
 import openpyxl
+from io import BytesIO
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+import vl_convert as vlc
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Image as RLImage, Paragraph, SimpleDocTemplate, Spacer
 
 from client import (
     ClinicalTrialsClient,
     DEFAULT_FIELDS,
+    load_sponsors_from_file,
     run_etl,
+    run_sponsor_batch,
 )
 
 st.set_page_config(page_title="ClinicalTrials.gov — Extrator", page_icon="🧪", layout="wide")
@@ -51,6 +61,55 @@ def _essie_clause(field: str, values: list[str]) -> str | None:
     if len(values) == 1:
         return f"AREA[{field}]{values[0]}"
     return f"AREA[{field}]({' OR '.join(values)})"
+
+
+def _enrollment_clause(min_value: float, max_value: float) -> str | None:
+    """Monta a cláusula Essie de RANGE para EnrollmentCount."""
+    if not min_value and not max_value:
+        return None
+    lo = str(int(min_value)) if min_value else "MIN"
+    hi = str(int(max_value)) if max_value else "MAX"
+    return f"AREA[EnrollmentCount]RANGE[{lo},{hi}]"
+
+
+def _chart_to_png(chart: alt.Chart) -> bytes:
+    """Rasteriza um gráfico Altair/Vega-Lite em PNG via vl-convert."""
+    return vlc.vegalite_to_png(vl_spec=chart.to_dict(), scale=2)
+
+
+def _build_analytics_pptx(charts: dict[str, alt.Chart]) -> bytes:
+    """Monta uma apresentação PPTX com um slide por gráfico de analytics."""
+    presentation = Presentation()
+    blank_layout = presentation.slide_layouts[6]
+    slide_width = presentation.slide_width
+    for title, chart in charts.items():
+        slide = presentation.slides.add_slide(blank_layout)
+        title_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.2), slide_width - Inches(0.8), Inches(0.7))
+        title_frame = title_box.text_frame
+        title_frame.text = title
+        title_frame.paragraphs[0].font.size = Pt(24)
+        title_frame.paragraphs[0].font.bold = True
+        png_bytes = _chart_to_png(chart)
+        slide.shapes.add_picture(BytesIO(png_bytes), Inches(0.6), Inches(1.1), width=slide_width - Inches(1.2))
+    buffer = BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def _build_analytics_pdf(charts: dict[str, alt.Chart]) -> bytes:
+    """Monta um PDF com um gráfico de analytics por página."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    elements = []
+    for title, chart in charts.items():
+        elements.append(Paragraph(title, styles["Heading1"]))
+        elements.append(Spacer(1, 0.2 * inch))
+        png_bytes = _chart_to_png(chart)
+        elements.append(RLImage(BytesIO(png_bytes), width=6.5 * inch, height=4 * inch, kind="proportional"))
+        elements.append(Spacer(1, 0.4 * inch))
+    doc.build(elements)
+    return buffer.getvalue()
 # ---------------------------------------------------------------------------
 # Variáveis
 # ---------------------------------------------------------------------------
@@ -124,6 +183,11 @@ with st.form("search_form"):
         query_cond = st.text_input("Condição / doença", placeholder="ex: lung cancer")
         query_intr = st.text_input("Intervenção / tratamento")
         query_spons = st.text_input("Patrocinador")
+        sponsor_list_file = st.file_uploader(
+            "Lista de patrocinadores",
+            type=["txt", "xlsx", "xls"],
+            help="TXT: uma empresa por linha. XLSX/XLS: coluna obrigatória 'empresa'.",
+        )
         query_lead = st.text_input("Lead sponsor name")
     with col2:
         query_titles = st.text_input("Título / acrônimo")
@@ -194,6 +258,12 @@ with st.form("search_form"):
         )
         filter_advanced = st.text_input("Filtro avançado Essie adicional", placeholder="ex: AREA[StartDate]2022")
         filter_geo = st.text_input("Filtro geográfico", placeholder="ex: distance(-23.55,-46.63,50km)")
+        st.markdown("**Enrollment (meta de recrutamento)**")
+        enrollment_min_col, enrollment_max_col = st.columns(2)
+        with enrollment_min_col:
+            filter_enrollment_min = st.number_input("Mínimo", min_value=0, value=0, step=10)
+        with enrollment_max_col:
+            filter_enrollment_max = st.number_input("Máximo", min_value=0, value=0, step=10, help="0 = sem limite máximo")
 
 
     st.subheader("3. Campos e ordenação")
@@ -243,6 +313,7 @@ if submitted:
             _essie_clause("StudyType", filter_study_type),
             _essie_clause("Phase", filter_phase),
             _essie_clause("Sex", filter_sex),
+            _enrollment_clause(filter_enrollment_min, filter_enrollment_max),
             (
                 f"{'NOT ' if location_country_operator == 'Não contém' else ''}"
                 f"AREA[LocationCountry]{location_country}"
@@ -257,24 +328,45 @@ if submitted:
 
     with st.spinner("Extraindo dados do ClinicalTrials.gov..."):
         try:
-            records = run_etl(
-                output_path=f"results.{output_format}",  # não utilizado diretamente; download é feito via UI
-                output_format="dataframe",
-                max_studies=max_studies,
-                fields=fields,
-                query_cond=query_cond or None,
-                query_intr=query_intr or None,
-                query_spons=query_spons or None,
-                query_lead=query_lead or None,
-                query_titles=query_titles or None,
-                query_term=query_term or None,
-                query_id=query_id or None,
-                filter_overall_status=filter_status or None,
-                filter_ids=filter_ids_input,
-                filter_advanced=combined_advanced,
-                filter_geo=filter_geo or None,
-                sort=sort,
-            )
+            search_kwargs = {
+                "query_cond": query_cond or None,
+                "query_intr": query_intr or None,
+                "query_lead": query_lead or None,
+                "query_titles": query_titles or None,
+                "query_term": query_term or None,
+                "query_id": query_id or None,
+                "filter_overall_status": filter_status or None,
+                "filter_ids": filter_ids_input,
+                "filter_advanced": combined_advanced,
+                "filter_geo": filter_geo or None,
+                "sort": sort,
+            }
+            sponsors = [query_spons] if query_spons.strip() else []
+            if sponsor_list_file is not None:
+                sponsors.extend(
+                    load_sponsors_from_file(
+                        sponsor_list_file,
+                        filename=sponsor_list_file.name,
+                    )
+                )
+
+            if sponsors:
+                records, sponsor_summary = run_sponsor_batch(
+                    sponsors,
+                    max_studies_per_sponsor=max_studies,
+                    fields=fields,
+                    **search_kwargs,
+                )
+                st.session_state["sponsor_summary"] = sponsor_summary
+            else:
+                records = run_etl(
+                    output_path=f"results.{output_format}",  # não utilizado diretamente; download é feito via UI
+                    output_format="dataframe",
+                    max_studies=max_studies,
+                    fields=fields,
+                    **search_kwargs,
+                )
+                st.session_state.pop("sponsor_summary", None)
             st.session_state["df"] = records
             st.session_state["output_format"] = output_format
         except Exception as e:
@@ -288,6 +380,10 @@ df = st.session_state.get("df")
 if df is not None:
     st.subheader("5. Resultado")
     st.write(f"**{len(df)}** estudos encontrados.")
+    sponsor_summary = st.session_state.get("sponsor_summary")
+    if sponsor_summary is not None:
+        with st.expander("Resumo por patrocinador"):
+            st.dataframe(sponsor_summary, width="stretch", hide_index=True)
     display_df = df.drop(columns=["_site_locations"], errors="ignore").copy()
     priority_columns = [
         column for column in ("nct_id", "brief_title", "acronym", "countries")
@@ -364,6 +460,24 @@ if df is not None:
     st.divider()
     st.subheader("6. Analytics")
 
+    if "geo_filter" not in st.session_state:
+        st.session_state["geo_filter"] = "Mundo"
+
+    geo_col1, geo_col2 = st.columns(2)
+    with geo_col1:
+        if st.button("🇧🇷 Brasil", width="stretch"):
+            st.session_state["geo_filter"] = "Brasil"
+    with geo_col2:
+        if st.button("🌎 Mundo", width="stretch"):
+            st.session_state["geo_filter"] = "Mundo"
+
+    if st.session_state["geo_filter"] == "Brasil" and "countries" in df.columns:
+        df = df[df["countries"].fillna("").astype(str).str.contains("Brazil", case=False)].copy()
+
+    st.caption(f"Filtro geográfico atual: **{st.session_state['geo_filter']}** ({len(df)} estudos)")
+
+    analytics_charts: dict[str, alt.Chart] = {}
+
     def _split_column(column: str) -> pd.DataFrame:
         """Transforma valores separados por ponto e vírgula em linhas contáveis."""
         if column not in df.columns:
@@ -411,7 +525,13 @@ if df is not None:
                 .rename_axis("ano").reset_index(name="estudos")
             )
             st.markdown("**Volume de início por ano**")
-            st.line_chart(starts_by_year, x="ano", y="estudos", x_label="Ano", y_label="Estudos")
+            starts_chart = (
+                alt.Chart(starts_by_year)
+                .mark_line(point=True)
+                .encode(x=alt.X("ano:O", title="Ano"), y=alt.Y("estudos:Q", title="Estudos"))
+            )
+            st.altair_chart(starts_chart, use_container_width=True)
+            analytics_charts["Volume de início por ano"] = starts_chart
         else:
             _show_unavailable("Não há datas de início válidas para esta análise.")
     with duration_col:
@@ -457,7 +577,13 @@ if df is not None:
                 .rename(columns={"enrollment_count": "média de pacientes"})
             )
             st.markdown("**Enrollment médio por fase**")
-            st.bar_chart(phase_summary, x="phases", y="média de pacientes", x_label="Fase", y_label="Pacientes")
+            phase_chart = (
+                alt.Chart(phase_summary)
+                .mark_bar()
+                .encode(x=alt.X("phases:N", title="Fase"), y=alt.Y("média de pacientes:Q", title="Pacientes"))
+            )
+            st.altair_chart(phase_chart, use_container_width=True)
+            analytics_charts["Enrollment médio por fase"] = phase_chart
         else:
             _show_unavailable("Não há fases e enrollment válidos para cruzamento.")
 
@@ -469,7 +595,16 @@ if df is not None:
         country_col, complexity_col = st.columns(2)
         with country_col:
             st.markdown("**Polos de pesquisa: top 15 países**")
-            st.bar_chart(country_counts, x="país", y="estudos", x_label="País", y_label="Estudos", horizontal=True)
+            country_chart = (
+                alt.Chart(country_counts)
+                .mark_bar()
+                .encode(
+                    x=alt.X("estudos:Q", title="Estudos"),
+                    y=alt.Y("país:N", sort="-x", title="País"),
+                )
+            )
+            st.altair_chart(country_chart, use_container_width=True)
+            analytics_charts["Polos de pesquisa: top 15 países"] = country_chart
         with complexity_col:
             country_count_per_study = df["countries"].fillna("").astype(str).map(
                 lambda value: len({country.strip() for country in value.split(";") if country.strip()})
@@ -510,8 +645,17 @@ if df is not None:
             .agg(estudos=("lead_sponsor_name", "size"), enrollment_médio=("enrollment_count", "mean"))
             .sort_values("estudos", ascending=False).head(15)
         )
-        st.bar_chart(sponsor_summary, x="lead_sponsor_name", y="estudos", x_label="Patrocinador", y_label="Estudos", horizontal=True)
+        sponsor_chart = (
+            alt.Chart(sponsor_summary)
+            .mark_bar()
+            .encode(
+                x=alt.X("estudos:Q", title="Estudos"),
+                y=alt.Y("lead_sponsor_name:N", sort="-x", title="Patrocinador"),
+            )
+        )
+        st.altair_chart(sponsor_chart, use_container_width=True)
         st.dataframe(sponsor_summary, hide_index=True, width="stretch")
+        analytics_charts["Top 15 patrocinadores"] = sponsor_chart
     else:
         _show_unavailable("Não há patrocinadores válidos para esta análise.")
 
@@ -524,14 +668,29 @@ if df is not None:
         if not condition_data.empty:
             condition_counts = condition_data["conditions"].value_counts().head(15).rename_axis("condição").reset_index(name="estudos")
             st.markdown("**Condições mais frequentes**")
-            st.bar_chart(condition_counts, x="condição", y="estudos", x_label="Condição", y_label="Estudos", horizontal=True)
+            condition_chart = (
+                alt.Chart(condition_counts)
+                .mark_bar()
+                .encode(
+                    x=alt.X("estudos:Q", title="Estudos"),
+                    y=alt.Y("condição:N", sort="-x", title="Condição"),
+                )
+            )
+            st.altair_chart(condition_chart, use_container_width=True)
+            analytics_charts["Condições mais frequentes"] = condition_chart
         else:
             _show_unavailable("Não há condições válidas para análise.")
     with intervention_col:
         if not intervention_data.empty:
             intervention_counts = intervention_data["intervention_types"].value_counts().rename_axis("tipo").reset_index(name="ocorrências")
             st.markdown("**Tipos de intervenção**")
-            st.bar_chart(intervention_counts, x="tipo", y="ocorrências", x_label="Tipo", y_label="Ocorrências")
+            intervention_chart = (
+                alt.Chart(intervention_counts)
+                .mark_bar()
+                .encode(x=alt.X("tipo:N", title="Tipo"), y=alt.Y("ocorrências:Q", title="Ocorrências"))
+            )
+            st.altair_chart(intervention_chart, use_container_width=True)
+            analytics_charts["Tipos de intervenção"] = intervention_chart
             intervention_profile = df["intervention_types"].fillna("").astype(str).map(
                 lambda value: [item.strip() for item in value.split(";") if item.strip()]
             )
@@ -544,4 +703,37 @@ if df is not None:
                 st.metric("Estudos somente com medicamentos", f"{drug_share:.1f}%", border=True)
         else:
             _show_unavailable("Não há tipos de intervenção válidos para análise.")
+
+    # -----------------------------------------------------------------
+    # Exportação dos gráficos de analytics
+    # -----------------------------------------------------------------
+    st.divider()
+    st.subheader("7. Exportar analytics")
+    if not analytics_charts:
+        st.info("Nenhum gráfico disponível para exportação com os dados atuais.")
+    else:
+        st.caption(f"{len(analytics_charts)} gráfico(s) serão incluídos na exportação.")
+        export_col1, export_col2 = st.columns(2)
+        with export_col1:
+            if st.button("📊 Gerar PPTX", width="stretch"):
+                st.session_state["analytics_pptx"] = _build_analytics_pptx(analytics_charts)
+            if "analytics_pptx" in st.session_state:
+                st.download_button(
+                    label="⬇️ Baixar PPTX",
+                    data=st.session_state["analytics_pptx"],
+                    file_name="analytics_clinicaltrials.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    width="stretch",
+                )
+        with export_col2:
+            if st.button("📄 Gerar PDF", width="stretch"):
+                st.session_state["analytics_pdf"] = _build_analytics_pdf(analytics_charts)
+            if "analytics_pdf" in st.session_state:
+                st.download_button(
+                    label="⬇️ Baixar PDF",
+                    data=st.session_state["analytics_pdf"],
+                    file_name="analytics_clinicaltrials.pdf",
+                    mime="application/pdf",
+                    width="stretch",
+                )
 

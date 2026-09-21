@@ -72,8 +72,10 @@ import csv
 import json
 import logging
 import time
+from collections.abc import Iterable
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, BinaryIO, Generator, Optional, TextIO
 
 import requests
 
@@ -143,7 +145,11 @@ class ClinicalTrialsClient:
             request_params["pageToken"] = page_token
 
         response = self.session.get(f"{BASE_URL}/studies", params=request_params, timeout=30)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except RequestException as error:
+            detail = response.text.strip()
+            raise RequestException(f"{error} | Resposta da API: {detail}", response=response) from error
         return response.json()
 
     # ------------------------------------------------------------------
@@ -400,6 +406,108 @@ def load_to_dataframe(records: list[dict[str, Any]]):
         raise ImportError(
             "pandas não está instalado. Execute: pip install pandas"
         )
+
+
+def normalize_sponsors(sponsors: Iterable[object]) -> list[str]:
+    """Remove valores vazios e duplicados, preservando a ordem da lista."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for sponsor in sponsors:
+        if not isinstance(sponsor, str):
+            continue
+        name = sponsor.strip()
+        key = name.casefold()
+        if name and key not in seen:
+            normalized.append(name)
+            seen.add(key)
+
+    return normalized
+
+
+def load_sponsors_from_file(
+    source: str | Path | BinaryIO | TextIO,
+    filename: Optional[str] = None,
+    column: str = "empresa",
+) -> list[str]:
+    """Carrega patrocinadores de TXT (uma empresa por linha) ou XLSX.
+
+    Em planilhas, a coluna ``empresa`` e obrigatória por padrão. O nome pode ser
+    alterado pelo parâmetro ``column``.
+    """
+    source_name = filename or getattr(source, "name", None) or str(source)
+    suffix = Path(source_name).suffix.lower()
+
+    if suffix == ".txt":
+        if isinstance(source, (str, Path)):
+            content = Path(source).read_text(encoding="utf-8-sig")
+        else:
+            raw_content = source.read()
+            content = raw_content.decode("utf-8-sig") if isinstance(raw_content, bytes) else raw_content
+        return normalize_sponsors(content.splitlines())
+
+    if suffix in {".xlsx", ".xls"}:
+        if isinstance(source, (str, Path)):
+            dataframe = pd.read_excel(source)
+        else:
+            dataframe = pd.read_excel(BytesIO(source.read()))
+        matching_columns = {str(name).strip().casefold(): name for name in dataframe.columns}
+        requested_column = column.strip().casefold()
+        if requested_column not in matching_columns:
+            raise ValueError(f"A planilha deve conter a coluna '{column}'.")
+        return normalize_sponsors(dataframe[matching_columns[requested_column]].tolist())
+
+    raise ValueError("Formato não suportado. Envie um arquivo .txt, .xlsx ou .xls.")
+
+
+def run_sponsor_batch(
+    sponsors: Iterable[object],
+    max_studies_per_sponsor: Optional[int] = None,
+    fields: Optional[list[str]] = None,
+    **search_kwargs,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Consulta cada patrocinador e retorna estudos e resumo do processamento.
+
+    ``max_studies_per_sponsor`` e aplicado individualmente, pois cada empresa
+    representa uma consulta independente. Erros de uma empresa não interrompem
+    as demais consultas.
+    """
+    sponsor_list = normalize_sponsors(sponsors)
+    if not sponsor_list:
+        raise ValueError("A lista de patrocinadores não contém empresas válidas.")
+
+    client = ClinicalTrialsClient()
+    records: list[dict[str, Any]] = []
+    summary: list[dict[str, Any]] = []
+
+    for sponsor in sponsor_list:
+        try:
+            studies = client.iter_studies(
+                query_spons=sponsor,
+                fields=fields or DEFAULT_FIELDS,
+                max_studies=max_studies_per_sponsor,
+                **search_kwargs,
+            )
+            sponsor_records = transform_studies(list(studies))
+            for record in sponsor_records:
+                record["empresa_consultada"] = sponsor
+            records.extend(sponsor_records)
+            summary.append({
+                "empresa_consultada": sponsor,
+                "estudos_encontrados": len(sponsor_records),
+                "status_consulta": "concluida",
+                "erro": "",
+            })
+        except RequestException as error:
+            logger.exception("Falha ao consultar patrocinador: %s", sponsor)
+            summary.append({
+                "empresa_consultada": sponsor,
+                "estudos_encontrados": 0,
+                "status_consulta": "erro",
+                "erro": str(error),
+            })
+
+    return pd.DataFrame(records), pd.DataFrame(summary)
 
 
 # ---------------------------------------------------------------------------
