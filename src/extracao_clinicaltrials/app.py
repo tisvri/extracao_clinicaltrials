@@ -10,6 +10,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 import vl_convert as vlc
+from PIL import Image as PILImage
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from reportlab.lib.pagesizes import letter
@@ -21,7 +22,9 @@ from client import (
     ClinicalTrialsClient,
     DEFAULT_FIELDS,
     load_sponsors_from_file,
+    load_values_from_file,
     run_etl,
+    run_multi_value_batch,
     run_sponsor_batch,
 )
 
@@ -72,41 +75,88 @@ def _enrollment_clause(min_value: float, max_value: float) -> str | None:
     return f"AREA[EnrollmentCount]RANGE[{lo},{hi}]"
 
 
+def _dedupe_by_consulted_values(df: pd.DataFrame) -> pd.DataFrame:
+    """Une estudos duplicados (mesmo nct_id) resultantes de buscas em lote, concatenando os valores consultados."""
+    consulted_columns = [c for c in df.columns if c.endswith("_consultada") or c.endswith("_consultado")]
+    if not consulted_columns or "nct_id" not in df.columns or not df["nct_id"].duplicated().any():
+        return df
+
+    def _join_unique(values: pd.Series) -> str:
+        return "; ".join(dict.fromkeys(v for v in values if v))
+
+    other_columns = [c for c in df.columns if c not in consulted_columns and c != "nct_id"]
+    aggregations = {col: _join_unique for col in consulted_columns}
+    aggregations.update({col: "first" for col in other_columns})
+    return df.groupby("nct_id", as_index=False, sort=False).agg(aggregations)
+
+
 def _chart_to_png(chart: alt.Chart) -> bytes:
-    """Rasteriza um gráfico Altair/Vega-Lite em PNG via vl-convert."""
-    return vlc.vegalite_to_png(vl_spec=chart.to_dict(), scale=2)
+    """Rasteriza um gráfico Altair/Vega-Lite em PNG via vl-convert, com tamanho fixo e consistente."""
+    sized_chart = chart.properties(width=900, height=540)
+    return vlc.vegalite_to_png(vl_spec=sized_chart.to_dict(), scale=2)
+
+
+def _fit_box(png_bytes: bytes, max_width_in: float, max_height_in: float) -> tuple[float, float]:
+    """Calcula largura/altura (em polegadas) que preservam a proporção da imagem dentro de uma caixa máxima."""
+    with PILImage.open(BytesIO(png_bytes)) as image:
+        pixel_width, pixel_height = image.size
+    aspect = pixel_width / pixel_height
+    width_in, height_in = max_width_in, max_width_in / aspect
+    if height_in > max_height_in:
+        height_in, width_in = max_height_in, max_height_in * aspect
+    return width_in, height_in
 
 
 def _build_analytics_pptx(charts: dict[str, alt.Chart]) -> bytes:
-    """Monta uma apresentação PPTX com um slide por gráfico de analytics."""
+    """Monta uma apresentação PPTX com um slide por gráfico de analytics, mantendo a proporção original."""
     presentation = Presentation()
+    presentation.slide_width = Inches(13.333)
+    presentation.slide_height = Inches(7.5)
     blank_layout = presentation.slide_layouts[6]
-    slide_width = presentation.slide_width
+    slide_width_in = presentation.slide_width / Inches(1)
+    slide_height_in = presentation.slide_height / Inches(1)
+    content_top_in = 1.2
+    content_bottom_margin_in = 0.4
+    content_side_margin_in = 0.5
+    max_width_in = slide_width_in - 2 * content_side_margin_in
+    max_height_in = slide_height_in - content_top_in - content_bottom_margin_in
     for title, chart in charts.items():
         slide = presentation.slides.add_slide(blank_layout)
-        title_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.2), slide_width - Inches(0.8), Inches(0.7))
+        title_box = slide.shapes.add_textbox(
+            Inches(0.4), Inches(0.2), presentation.slide_width - Inches(0.8), Inches(0.7)
+        )
         title_frame = title_box.text_frame
         title_frame.text = title
         title_frame.paragraphs[0].font.size = Pt(24)
         title_frame.paragraphs[0].font.bold = True
         png_bytes = _chart_to_png(chart)
-        slide.shapes.add_picture(BytesIO(png_bytes), Inches(0.6), Inches(1.1), width=slide_width - Inches(1.2))
+        width_in, height_in = _fit_box(png_bytes, max_width_in, max_height_in)
+        left_in = (slide_width_in - width_in) / 2
+        top_in = content_top_in + (max_height_in - height_in) / 2
+        slide.shapes.add_picture(
+            BytesIO(png_bytes), Inches(left_in), Inches(top_in), width=Inches(width_in), height=Inches(height_in)
+        )
     buffer = BytesIO()
     presentation.save(buffer)
     return buffer.getvalue()
 
 
 def _build_analytics_pdf(charts: dict[str, alt.Chart]) -> bytes:
-    """Monta um PDF com um gráfico de analytics por página."""
+    """Monta um PDF com um gráfico de analytics por página, mantendo a proporção original."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
+    max_width_in = (letter[0] / inch) - 2
+    max_height_in = 5.0
     elements = []
     for title, chart in charts.items():
         elements.append(Paragraph(title, styles["Heading1"]))
         elements.append(Spacer(1, 0.2 * inch))
         png_bytes = _chart_to_png(chart)
-        elements.append(RLImage(BytesIO(png_bytes), width=6.5 * inch, height=4 * inch, kind="proportional"))
+        width_in, height_in = _fit_box(png_bytes, max_width_in, max_height_in)
+        image = RLImage(BytesIO(png_bytes), width=width_in * inch, height=height_in * inch)
+        image.hAlign = "CENTER"
+        elements.append(image)
         elements.append(Spacer(1, 0.4 * inch))
     doc.build(elements)
     return buffer.getvalue()
@@ -181,19 +231,39 @@ with st.form("search_form"):
     col1, col2 = st.columns(2)
     with col1:
         query_cond = st.text_input("Condição / doença", placeholder="ex: lung cancer")
+        cond_list_file = st.file_uploader(
+            "Lista de condições/doenças",
+            type=["txt", "xlsx", "xls"],
+            help="TXT: uma condição por linha. XLSX/XLS: coluna obrigatória 'condicao'.",
+        )
         query_intr = st.text_input("Intervenção / tratamento")
-        query_spons = st.text_input("Patrocinador")
+        intr_list_file = st.file_uploader(
+            "Lista de intervenções/tratamentos",
+            type=["txt", "xlsx", "xls"],
+            help="TXT: uma intervenção por linha. XLSX/XLS: coluna obrigatória 'intervencao'.",
+        )
+        query_spons = st.text_input("Patrocinador/Colaborador")
         sponsor_list_file = st.file_uploader(
-            "Lista de patrocinadores",
+            "Lista de patrocinadores e/ou colaboradores",
             type=["txt", "xlsx", "xls"],
             help="TXT: uma empresa por linha. XLSX/XLS: coluna obrigatória 'empresa'.",
         )
-        query_lead = st.text_input("Lead sponsor name")
+        query_lead = st.text_input("Patrocinador")
+        lead_list_file = st.file_uploader(
+            "Lista de patrocinadores (lead)",
+            type=["txt", "xlsx", "xls"],
+            help="TXT: um patrocinador por linha. XLSX/XLS: coluna obrigatória 'patrocinador'.",
+        )
     with col2:
         query_titles = st.text_input("Título / acrônimo")
         query_term = st.text_input(
             "Termos gerais",
             placeholder="ex: AREA[LastUpdatePostDate]RANGE[2023-01-01,MAX]",
+        )
+        term_list_file = st.file_uploader(
+            "Lista de termos gerais",
+            type=["txt", "xlsx", "xls"],
+            help="TXT: um termo por linha. XLSX/XLS: coluna obrigatória 'termo'.",
         )
         query_id = st.text_input("IDs de estudo", placeholder="ex: NCT04852770")
 
@@ -326,6 +396,20 @@ if submitted:
     ]
     combined_advanced = " AND ".join(advanced_clauses) or None
 
+    def _collect_values(manual_value: str, uploaded_file, column: str) -> list[str]:
+        """Combina o valor digitado manualmente com os valores de um arquivo de lista, sem duplicatas."""
+        values = [manual_value] if manual_value.strip() else []
+        if uploaded_file is not None:
+            values.extend(load_values_from_file(uploaded_file, filename=uploaded_file.name, column=column))
+        seen: set[str] = set()
+        unique_values: list[str] = []
+        for value in values:
+            key = value.strip().casefold()
+            if value.strip() and key not in seen:
+                unique_values.append(value.strip())
+                seen.add(key)
+        return unique_values
+
     with st.spinner("Extraindo dados do ClinicalTrials.gov..."):
         try:
             search_kwargs = {
@@ -350,14 +434,44 @@ if submitted:
                     )
                 )
 
+            # Lista de eixos de lote suportados: cada um combina campo de busca,
+            # arquivo enviado e o rótulo usado no resumo por valor consultado.
+            list_axes = [
+                ("query_cond", cond_list_file, "condicao", "condicao_consultada",
+                 _collect_values(query_cond, cond_list_file, "condicao")),
+                ("query_intr", intr_list_file, "intervencao", "intervencao_consultada",
+                 _collect_values(query_intr, intr_list_file, "intervencao")),
+                ("query_term", term_list_file, "termo", "termo_consultado",
+                 _collect_values(query_term, term_list_file, "termo")),
+                ("query_lead", lead_list_file, "patrocinador", "patrocinador_consultado",
+                 _collect_values(query_lead, lead_list_file, "patrocinador")),
+            ]
+            file_driven_axes = [axis for axis in list_axes if axis[1] is not None]
+
             if sponsors:
-                records, sponsor_summary = run_sponsor_batch(
+                records, batch_summary = run_sponsor_batch(
                     sponsors,
                     max_studies_per_sponsor=max_studies,
                     fields=fields,
                     **search_kwargs,
                 )
-                st.session_state["sponsor_summary"] = sponsor_summary
+                st.session_state["sponsor_summary"] = batch_summary
+            elif file_driven_axes:
+                if len(file_driven_axes) > 1:
+                    st.warning(
+                        "Apenas uma lista é processada por busca; considerando somente a primeira lista informada."
+                    )
+                query_field, _, _, summary_label, values = file_driven_axes[0]
+                batch_kwargs = {key: value for key, value in search_kwargs.items() if key != query_field}
+                records, batch_summary = run_multi_value_batch(
+                    values,
+                    query_field=query_field,
+                    max_studies_per_value=max_studies,
+                    fields=fields,
+                    summary_label=summary_label,
+                    **batch_kwargs,
+                )
+                st.session_state["sponsor_summary"] = batch_summary
             else:
                 records = run_etl(
                     output_path=f"results.{output_format}",  # não utilizado diretamente; download é feito via UI
@@ -367,6 +481,7 @@ if submitted:
                     **search_kwargs,
                 )
                 st.session_state.pop("sponsor_summary", None)
+            records = _dedupe_by_consulted_values(records)
             st.session_state["df"] = records
             st.session_state["output_format"] = output_format
         except Exception as e:
@@ -382,7 +497,7 @@ if df is not None:
     st.write(f"**{len(df)}** estudos encontrados.")
     sponsor_summary = st.session_state.get("sponsor_summary")
     if sponsor_summary is not None:
-        with st.expander("Resumo por patrocinador"):
+        with st.expander("Resumo por valor consultado"):
             st.dataframe(sponsor_summary, width="stretch", hide_index=True)
     display_df = df.drop(columns=["_site_locations"], errors="ignore").copy()
     priority_columns = [
