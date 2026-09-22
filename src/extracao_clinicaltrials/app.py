@@ -8,6 +8,7 @@ from io import BytesIO
 
 import altair as alt
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 import vl_convert as vlc
 from PIL import Image as PILImage
@@ -372,6 +373,8 @@ if submitted:
         "CentralContactEMail",
         "CollaboratorName",
         "LocationGeoPoint",
+        "CompletionDate",
+        "StudyFirstPostDate",
     ]))
     sort = [v.strip() for v in sort_raw.split(",") if v.strip()] or None
     max_studies = int(max_studies_raw) if max_studies_raw.strip().isdigit() else None
@@ -578,6 +581,8 @@ if df is not None:
     if "geo_filter" not in st.session_state:
         st.session_state["geo_filter"] = "Mundo"
 
+    original_df = df.copy()
+
     geo_col1, geo_col2 = st.columns(2)
     with geo_col1:
         if st.button("🇧🇷 Brasil", width="stretch"):
@@ -618,48 +623,86 @@ if df is not None:
                 map_points.append({"nct_id": nct_id, **location})
         return pd.DataFrame(map_points)
 
-    # 1. Cronograma: volume por ano e duração esperada do estudo.
-    st.markdown("**1. Análises temporais e de cronograma**")
-    start_dates = pd.to_datetime(
-        df["start_date"] if "start_date" in df.columns else pd.Series(index=df.index),
+    # 0. Indicadores essenciais (sempre calculados sobre a base completa, sem o filtro Brasil/Mundo).
+    st.markdown("**Indicadores essenciais**")
+    total_studies = len(original_df)
+    total_brazil = (
+        int(original_df["countries"].fillna("").astype(str).str.contains("Brazil", case=False).sum())
+        if "countries" in original_df.columns
+        else 0
+    )
+    essential_cards = st.container(horizontal=True)
+    with essential_cards:
+        st.metric("Total de estudos", f"{total_studies:,}", border=True)
+        st.metric("Total de estudos no Brasil", f"{total_brazil:,}", border=True)
+
+    # 1. Análises temporais: cadastro no CT (First Posted) e conclusão prevista.
+    st.markdown("**1. Análises temporais**")
+    first_posted_dates = pd.to_datetime(
+        df["first_posted_date"] if "first_posted_date" in df.columns else pd.Series(index=df.index),
         errors="coerce",
     )
-    completion_dates = pd.to_datetime(
-        df["primary_completion_date"]
-        if "primary_completion_date" in df.columns
-        else pd.Series(index=df.index),
+    planned_completion_dates = pd.to_datetime(
+        df["completion_date"] if "completion_date" in df.columns else pd.Series(index=df.index),
         errors="coerce",
     )
-    duration_days = (completion_dates - start_dates).dt.days
-    duration = duration_days[duration_days.ge(0)]
-    temporal_col, duration_col = st.columns(2)
-    with temporal_col:
-        if start_dates.notna().any():
-            starts_by_year = (
-                start_dates.dropna().dt.year.value_counts().sort_index()
+    posted_col, completion_col = st.columns(2)
+    with posted_col:
+        if first_posted_dates.notna().any():
+            posted_by_year = (
+                first_posted_dates.dropna().dt.year.value_counts().sort_index()
                 .rename_axis("ano").reset_index(name="estudos")
             )
-            st.markdown("**Volume de início por ano**")
-            starts_chart = (
-                alt.Chart(starts_by_year)
-                .mark_line(point=True)
-                .encode(x=alt.X("ano:O", title="Ano"), y=alt.Y("estudos:Q", title="Estudos"))
+            st.markdown("**Estudos cadastrados por ano (First Posted)**")
+            posted_chart = (
+                alt.Chart(posted_by_year)
+                .mark_bar()
+                .encode(x=alt.X("ano:O", title="Ano de cadastro"), y=alt.Y("estudos:Q", title="Estudos"))
             )
-            st.altair_chart(starts_chart, use_container_width=True)
-            analytics_charts["Volume de início por ano"] = starts_chart
+            st.altair_chart(posted_chart, use_container_width=True)
+            analytics_charts["Estudos cadastrados por ano (First Posted)"] = posted_chart
         else:
-            _show_unavailable("Não há datas de início válidas para esta análise.")
-    with duration_col:
-        if duration.size:
-            st.metric("Duração média esperada", f"{duration.mean() / 30.44:.1f} meses", border=True)
-            st.metric("Estudos com datas comparáveis", f"{duration.size}", border=True)
-            duration_df = pd.DataFrame({"duração (meses)": duration / 30.44})
-            st.bar_chart(duration_df, x=None, y="duração (meses)", x_label="Estudo", y_label="Meses")
+            _show_unavailable("Não há datas de cadastro (First Posted) válidas para esta análise.")
+    with completion_col:
+        if planned_completion_dates.notna().any():
+            completion_by_year = (
+                planned_completion_dates.dropna().dt.year.value_counts().sort_index()
+                .rename_axis("ano").reset_index(name="estudos")
+            )
+            st.markdown("**Estudos por ano de conclusão prevista**")
+            completion_chart = (
+                alt.Chart(completion_by_year)
+                .mark_bar()
+                .encode(x=alt.X("ano:O", title="Ano de conclusão prevista"), y=alt.Y("estudos:Q", title="Estudos"))
+            )
+            st.altair_chart(completion_chart, use_container_width=True)
+            analytics_charts["Estudos por ano de conclusão prevista"] = completion_chart
         else:
-            _show_unavailable("Não há pares válidos de início e conclusão primária.")
+            _show_unavailable("Não há datas de conclusão prevista válidas para esta análise.")
 
-    # 2. Enrollment: escala geral e relação com fase clínica.
-    st.markdown("**2. Análises de volumetria e escopo**")
+    # 2. Distribuição por fase.
+    st.markdown("**2. Distribuição por fase**")
+    phase_split = _split_column("phases")
+    if not phase_split.empty:
+        phase_counts = (
+            phase_split["phases"].map(lambda p: phase_labels.get(p, p)).value_counts()
+            .rename_axis("fase").reset_index(name="estudos")
+        )
+        phase_dist_chart = (
+            alt.Chart(phase_counts)
+            .mark_bar()
+            .encode(
+                x=alt.X("fase:N", title="Fase", sort="-y", axis=alt.Axis(labelAngle=-30)),
+                y=alt.Y("estudos:Q", title="Estudos"),
+            )
+        )
+        st.altair_chart(phase_dist_chart, use_container_width=True)
+        analytics_charts["Distribuição por fase"] = phase_dist_chart
+    else:
+        _show_unavailable("Não há fases válidas para esta análise.")
+
+    # 3. Enrollment: escala geral e relação com fase clínica.
+    st.markdown("**3. Análises de volumetria e escopo (enrollment)**")
     enrollment = pd.to_numeric(
         df["enrollment_count"]
         if "enrollment_count" in df.columns
@@ -683,9 +726,8 @@ if df is not None:
             phase_data["enrollment_count"] = pd.to_numeric(phase_data["enrollment_count"], errors="coerce")
             phase_data["phases"] = phase_data["phases"].fillna("").astype(str).str.split(";")
             phase_data = phase_data.explode("phases")
-            phase_data["phases"] = phase_data["phases"].str.strip()
+            phase_data["phases"] = phase_data["phases"].str.strip().map(lambda p: phase_labels.get(p, p))
             phase_data = phase_data[phase_data["phases"].ne("")]
-            phase_data["enrollment_count"] = pd.to_numeric(phase_data["enrollment_count"], errors="coerce")
             phase_summary = (
                 phase_data.dropna(subset=["enrollment_count"])
                 .groupby("phases", as_index=False)["enrollment_count"].mean()
@@ -695,31 +737,32 @@ if df is not None:
             phase_chart = (
                 alt.Chart(phase_summary)
                 .mark_bar()
-                .encode(x=alt.X("phases:N", title="Fase"), y=alt.Y("média de pacientes:Q", title="Pacientes"))
+                .encode(x=alt.X("phases:N", title="Fase", sort="-y"), y=alt.Y("média de pacientes:Q", title="Pacientes"))
             )
             st.altair_chart(phase_chart, use_container_width=True)
             analytics_charts["Enrollment médio por fase"] = phase_chart
         else:
             _show_unavailable("Não há fases e enrollment válidos para cruzamento.")
 
-    # 3. Geografia: concentração e complexidade logística.
-    st.markdown("**3. Análises geográficas e logísticas**")
+    # 4. Geografia: concentração, complexidade logística e mapa por país.
+    st.markdown("**4. Análises geográficas**")
     countries = _split_column("countries")
-    if "countries" in df.columns:
-        country_counts = countries["countries"].value_counts().head(15).rename_axis("país").reset_index(name="estudos")
+    if "countries" in df.columns and not countries.empty:
+        country_counts_all = countries["countries"].value_counts().rename_axis("país").reset_index(name="estudos")
+        country_counts = country_counts_all.head(15)
         country_col, complexity_col = st.columns(2)
         with country_col:
-            st.markdown("**Polos de pesquisa: top 15 países**")
+            st.markdown("**Estudos por país (top 15)**")
             country_chart = (
                 alt.Chart(country_counts)
                 .mark_bar()
                 .encode(
                     x=alt.X("estudos:Q", title="Estudos"),
-                    y=alt.Y("país:N", sort="-x", title="País"),
+                    y=alt.Y("país:N", sort="-x", title="País", axis=alt.Axis(labelLimit=0)),
                 )
             )
             st.altair_chart(country_chart, use_container_width=True)
-            analytics_charts["Polos de pesquisa: top 15 países"] = country_chart
+            analytics_charts["Estudos por país (top 15)"] = country_chart
         with complexity_col:
             country_count_per_study = df["countries"].fillna("").astype(str).map(
                 lambda value: len({country.strip() for country in value.split(";") if country.strip()})
@@ -731,6 +774,17 @@ if df is not None:
                 st.caption(f"Base válida: {country_count_per_study.size} estudos.")
             else:
                 _show_unavailable("Não há países válidos para medir a complexidade logística.")
+
+        st.markdown("**Mapa de estudos por país**")
+        country_map_fig = px.choropleth(
+            country_counts_all,
+            locations="país",
+            locationmode="country names",
+            color="estudos",
+            color_continuous_scale="Blues",
+        )
+        country_map_fig.update_layout(margin=dict(l=0, r=0, t=10, b=0))
+        st.plotly_chart(country_map_fig, use_container_width=True)
     else:
         _show_unavailable("A coluna countries não está disponível.")
 
@@ -742,8 +796,8 @@ if df is not None:
     else:
         _show_unavailable("Não há coordenadas disponíveis para exibir os centros no mapa.")
 
-    # 4. Patrocinadores: participação e perfil operacional.
-    st.markdown("**4. Análises de mercado e patrocinadores**")
+    # 5. Mercado e patrocinadores.
+    st.markdown("**5. Análise de mercado e patrocinadores**")
     sponsor_columns = ["lead_sponsor_name"]
     if "enrollment_count" in df.columns:
         sponsor_columns.append("enrollment_count")
@@ -765,7 +819,7 @@ if df is not None:
             .mark_bar()
             .encode(
                 x=alt.X("estudos:Q", title="Estudos"),
-                y=alt.Y("lead_sponsor_name:N", sort="-x", title="Patrocinador"),
+                y=alt.Y("lead_sponsor_name:N", sort="-x", title="Patrocinador", axis=alt.Axis(labelLimit=0)),
             )
         )
         st.altair_chart(sponsor_chart, use_container_width=True)
@@ -774,50 +828,104 @@ if df is not None:
     else:
         _show_unavailable("Não há patrocinadores válidos para esta análise.")
 
-    # 5. Perfil clínico e científico: condições e tipos de intervenção.
-    st.markdown("**5. Análises clínicas e científicas**")
+    # 6. Perfil clínico e científico: condições, tipo de intervenção e status.
+    st.markdown("**6. Análises clínicas e científicas**")
     condition_data = _split_column("conditions")
-    intervention_data = _split_column("intervention_types")
-    condition_col, intervention_col = st.columns(2)
-    with condition_col:
-        if not condition_data.empty:
-            condition_counts = condition_data["conditions"].value_counts().head(15).rename_axis("condição").reset_index(name="estudos")
-            st.markdown("**Condições mais frequentes**")
-            condition_chart = (
-                alt.Chart(condition_counts)
+    if not condition_data.empty:
+        condition_counts = condition_data["conditions"].value_counts().head(15).rename_axis("condição").reset_index(name="estudos")
+        st.markdown("**Condições mais frequentes (top 15)**")
+        condition_chart = (
+            alt.Chart(condition_counts)
+            .mark_bar()
+            .encode(
+                x=alt.X("estudos:Q", title="Estudos"),
+                y=alt.Y("condição:N", sort="-x", title="Condição", axis=alt.Axis(labelLimit=0)),
+            )
+        )
+        st.altair_chart(condition_chart, use_container_width=True)
+        analytics_charts["Condições mais frequentes"] = condition_chart
+    else:
+        _show_unavailable("Não há condições válidas para análise.")
+
+    intervention_type_col, status_col = st.columns(2)
+    with intervention_type_col:
+        intervention_type_data = _split_column("intervention_types")
+        if not intervention_type_data.empty:
+            intervention_type_counts = (
+                intervention_type_data["intervention_types"]
+                .map(lambda t: intervention_type_labels.get(t, t))
+                .value_counts().rename_axis("tipo").reset_index(name="estudos")
+            )
+            st.markdown("**Estudos por tipo de intervenção**")
+            intervention_type_chart = (
+                alt.Chart(intervention_type_counts)
                 .mark_bar()
                 .encode(
-                    x=alt.X("estudos:Q", title="Estudos"),
-                    y=alt.Y("condição:N", sort="-x", title="Condição"),
+                    x=alt.X("tipo:N", title="Tipo", sort="-y", axis=alt.Axis(labelAngle=-30)),
+                    y=alt.Y("estudos:Q", title="Estudos"),
                 )
             )
-            st.altair_chart(condition_chart, use_container_width=True)
-            analytics_charts["Condições mais frequentes"] = condition_chart
-        else:
-            _show_unavailable("Não há condições válidas para análise.")
-    with intervention_col:
-        if not intervention_data.empty:
-            intervention_counts = intervention_data["intervention_types"].value_counts().rename_axis("tipo").reset_index(name="ocorrências")
-            st.markdown("**Tipos de intervenção**")
-            intervention_chart = (
-                alt.Chart(intervention_counts)
-                .mark_bar()
-                .encode(x=alt.X("tipo:N", title="Tipo"), y=alt.Y("ocorrências:Q", title="Ocorrências"))
-            )
-            st.altair_chart(intervention_chart, use_container_width=True)
-            analytics_charts["Tipos de intervenção"] = intervention_chart
+            st.altair_chart(intervention_type_chart, use_container_width=True)
+            analytics_charts["Estudos por tipo de intervenção"] = intervention_type_chart
+
             intervention_profile = df["intervention_types"].fillna("").astype(str).map(
                 lambda value: [item.strip() for item in value.split(";") if item.strip()]
             )
             intervention_profile = intervention_profile[intervention_profile.map(bool)]
-            combined_share = intervention_profile.map(lambda items: len(set(items)) > 1).mean() * 100
-            drug_share = intervention_profile.map(lambda items: all(item == "DRUG" for item in items)).mean() * 100
-            metrics = st.container(horizontal=True)
-            with metrics:
-                st.metric("Estudos com intervenção combinada", f"{combined_share:.1f}%", border=True)
-                st.metric("Estudos somente com medicamentos", f"{drug_share:.1f}%", border=True)
+            if intervention_profile.size:
+                combined_share = intervention_profile.map(lambda items: len(set(items)) > 1).mean() * 100
+                drug_share = intervention_profile.map(lambda items: all(item == "DRUG" for item in items)).mean() * 100
+                metrics = st.container(horizontal=True)
+                with metrics:
+                    st.metric("Intervenção combinada", f"{combined_share:.1f}%", border=True)
+                    st.metric("Somente medicamentos", f"{drug_share:.1f}%", border=True)
         else:
             _show_unavailable("Não há tipos de intervenção válidos para análise.")
+    with status_col:
+        if "overall_status" in df.columns:
+            status_series = df["overall_status"].fillna("").astype(str).str.strip()
+            status_series = status_series[status_series.ne("")]
+            status_counts = (
+                status_series.map(lambda s: status_labels.get(s, s))
+                .value_counts().rename_axis("status").reset_index(name="estudos")
+            )
+            if not status_counts.empty:
+                st.markdown("**Estudos por status**")
+                status_chart = (
+                    alt.Chart(status_counts)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("status:N", title="Status", sort="-y", axis=alt.Axis(labelAngle=-30)),
+                        y=alt.Y("estudos:Q", title="Estudos"),
+                    )
+                )
+                st.altair_chart(status_chart, use_container_width=True)
+                analytics_charts["Estudos por status"] = status_chart
+            else:
+                _show_unavailable("Não há status válidos para análise.")
+        else:
+            _show_unavailable("A coluna overall_status não está disponível.")
+
+    # 7. Estudos por intervenção (nome completo).
+    st.markdown("**7. Estudos por intervenção (nome completo, top 15)**")
+    intervention_name_data = _split_column("intervention_names")
+    if not intervention_name_data.empty:
+        intervention_name_counts = (
+            intervention_name_data["intervention_names"].value_counts().head(15)
+            .rename_axis("intervenção").reset_index(name="estudos")
+        )
+        intervention_name_chart = (
+            alt.Chart(intervention_name_counts)
+            .mark_bar()
+            .encode(
+                x=alt.X("estudos:Q", title="Estudos"),
+                y=alt.Y("intervenção:N", sort="-x", title="Intervenção", axis=alt.Axis(labelLimit=0)),
+            )
+        )
+        st.altair_chart(intervention_name_chart, use_container_width=True)
+        analytics_charts["Estudos por intervenção"] = intervention_name_chart
+    else:
+        _show_unavailable("Não há intervenções válidas para análise.")
 
     # -----------------------------------------------------------------
     # Exportação dos gráficos de analytics
